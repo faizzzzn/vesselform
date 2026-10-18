@@ -306,7 +306,7 @@
     <ul>
       <li><kbd>N</kbd><span><b>Sketch</b> the profile — click for pen down, draw, click for pen up, double-click to finish</span></li>
       <li><span><b>Edit</b> the grips, then fine-tune with the sliders</span></li>
-      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd><span><b>Undo</b> any change &nbsp;·&nbsp; <kbd>R</kbd> <b>Random</b> &nbsp;·&nbsp; <kbd>S</kbd> <b>Save</b> version</span></li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd><span><b>Undo</b> · <kbd>Ctrl</kbd>+<kbd>S</kbd> <b>Save</b> · <kbd>F3</kbd> snap · <kbd>F7</kbd> grid · <kbd>←↑↓→</kbd> nudge grips · <kbd>N</kbd> sketch</span></li>
       <li><span>Type <code>SKETCH</code>, <code>HEIGHT 280</code>, <code>EXPORT GLB</code> below — <code>HELP</code> lists all commands</span></li>
       <li><span>STL / OBJ / GLB open in any 3D app — GLB exports in meters, the rest in mm</span></li>
     </ul>
@@ -366,7 +366,7 @@ const DEFAULTS = () => ({
   noiseAmt:0, noiseSeed:7, wall:3,
   mat:'porcelain', color:'#f2ede4', roughness:.12, metalness:0, clearcoat:1, opacity:1,
   backdrop:'dark', shadow:true, grid3d:false, autorotate:false, wireframe:false,
-  snap:false, grid2d:true, sel:-1,
+  snap:false, grid2d:true, sel:-1, selSet:new Set(),
 });
 let state = DEFAULTS();
 
@@ -708,12 +708,12 @@ function drawEditor(){
   arrow(xxL, dy, Math.PI, dc); arrow(xxR, dy, 0, dc);
   ectx.textAlign = 'center'; ectx.fillText('Ø ' + Math.round(R*2), (xxL+xxR)/2, dy+14);
 
-  /* --- square grips --- */
+  /* --- square grips (filled amber when selected) --- */
   state.points.forEach((p,i) => {
-    const x = X(p.x), y = Y(p.h), s = (i===dragIdx||i===hoverIdx||i===state.sel) ? 9 : 7;
-    ectx.fillStyle = (i===state.sel) ? '#d8a24a' : '#0b0b0c';
+    const x = X(p.x), y = Y(p.h), s = (i===dragIdx||i===hoverIdx||isSel(i)) ? 9 : 7;
+    ectx.fillStyle = isSel(i) ? '#d8a24a' : '#0b0b0c';
     ectx.fillRect(x-s/2, y-s/2, s, s);
-    ectx.strokeStyle = (i===dragIdx||i===hoverIdx||i===state.sel) ? '#d8a24a' : '#8f8a7d';
+    ectx.strokeStyle = (i===dragIdx||i===hoverIdx||isSel(i)) ? '#d8a24a' : '#8f8a7d';
     ectx.lineWidth = 1.6;
     ectx.strokeRect(x-s/2, y-s/2, s, s);
   });
@@ -801,13 +801,17 @@ ed.addEventListener('pointerdown', e => {
   }
   const i = hitPoint(px,py);
   if(i >= 0){
-    dragIdx = i; hoverIdx = i; state.sel = i;
-    moved = false; downXY = {x:e.clientX, y:e.clientY};
-    preDragSnap = snapshot();
-    ed.setPointerCapture(e.pointerId);
+    if(e.shiftKey){ toggleSel(i); dragIdx = -1; }
+    else{
+      selectOnly(i);
+      dragIdx = i; hoverIdx = i;
+      moved = false; downXY = {x:e.clientX, y:e.clientY};
+      preDragSnap = snapshot();
+      ed.setPointerCapture(e.pointerId);
+    }
     syncProps(); drawEditor();
   } else {
-    state.sel = -1; syncProps(); drawEditor();
+    clearSel(); syncProps(); drawEditor();
   }
 });
 ed.addEventListener('pointermove', e => {
@@ -833,7 +837,7 @@ ed.addEventListener('pointerup', e => {
   if(dragIdx >= 0 && e.altKey && !moved && state.points.length > 2){
     pushUndo(snapshot(), 'delete grip');
     state.points.splice(dragIdx,1);
-    if(state.sel >= state.points.length) state.sel = -1;
+    fixSelAfterRemove(dragIdx);
     markDirty(); syncProps();
   } else if(dragIdx >= 0 && moved && preDragSnap){
     pushUndo(preDragSnap, 'drag grip');
@@ -852,7 +856,7 @@ ed.addEventListener('dblclick', e => {
   const at = clamp(Math.floor(bi/per)+1, 1, state.points.length-1);
   pushUndo(snapshot(), 'add grip');
   state.points.splice(at, 0, { x:clamp(snap5(best.x),-160,160), h:clamp(snap5(best.h),-60,460) });
-  state.sel = at;
+  selectOnly(at);
   markDirty(); drawEditor(); syncProps();
 });
 ed.addEventListener('contextmenu', e => {
@@ -881,7 +885,7 @@ document.querySelectorAll('#mode-seg button').forEach(b =>
 
 function startSketch(){
   if(editMode === 'sketch') return;
-  editMode = 'sketch'; sketchPts = []; penDown = false; lastRec = null; state.sel = -1;
+  editMode = 'sketch'; sketchPts = []; penDown = false; lastRec = null; clearSel();
   paintSeg(); drawEditor(); syncProps();
   echo('SKETCH \u2014 click = pen DOWN, move to draw, click = pen up \u00B7 double-click / Enter / right-click finishes \u00B7 Esc cancels', 'ec-ok');
 }
@@ -950,7 +954,7 @@ function finishSketch(){
   if(pts.length < 3){ cancelSketch(); echo('sketch too short \u2014 profile unchanged', 'ec-err'); return; }
   pushUndo(snapshot(), 'sketch');
   state.points = pts.map(p => ({ x:p.x, h:p.h }));
-  state.sel = -1;
+  clearSel();
   editMode = 'edit'; sketchPts = []; lastRec = null;
   paintSeg(); syncProps(); drawEditor(); markDirty(); frameCamera();
   echo(`SKETCH done \u2014 ${state.points.length} points \u2192 profile`, 'ec-ok');
@@ -974,6 +978,7 @@ function restoreSnapshot(p){
     clearcoat:p.clearcoat, opacity:p.opacity,
     backdrop:bd, shadow:p.shadow!==false, grid3d:!!p.grid3d, sel:-1,
   });
+  state.selSet.clear();
   applyMaterial(); buildProps(); paintStatusToggles(); paintViewToggles();
   grid3.visible = state.grid3d;
   setBackdrop(bd);
@@ -995,6 +1000,31 @@ function redo(){
   if(editMode==='sketch') cancelSketch(true);
   restoreSnapshot(u.snap);
   echo('Redo', 'ec-ok');
+}
+
+/* ---------------- multi-grip selection (CAD-style) ----------------
+   state.sel    = primary grip (drives the GRIP properties panel)
+   state.selSet = full selection set (drives highlight, nudge, delete) */
+const isSel = i => state.selSet.has(i);
+function clearSel(){ state.sel = -1; state.selSet.clear(); }
+function selectOnly(i){ state.selSet = new Set([i]); state.sel = i; }
+function toggleSel(i){
+  if(state.selSet.has(i)) state.selSet.delete(i);
+  else state.selSet.add(i);
+  state.sel = state.selSet.has(i) ? i : (state.selSet.size ? [...state.selSet].pop() : -1);
+}
+function selectAll(){
+  state.selSet = new Set(state.points.map((_,i)=>i));
+  state.sel = state.points.length - 1;
+  syncProps(); drawEditor();
+  echo(`${state.points.length} grips selected`, 'ec-ok');
+}
+/* after a grip splice, drop it from the set and shift higher indices down */
+function fixSelAfterRemove(removed){
+  const ns = new Set();
+  state.selSet.forEach(i => { if(i < removed) ns.add(i); else if(i > removed) ns.add(i-1); });
+  state.selSet = ns;
+  state.sel = ns.has(state.sel) ? state.sel : (ns.size ? [...ns].pop() : -1);
 }
 
 /* 3D crosshair overlay */
@@ -1051,6 +1081,18 @@ function buildProps(){
   const selBox = document.createElement('div'); selSec.appendChild(selBox);
   const paintSel = () => {
     selBox.innerHTML = '';
+    const ids = [...state.selSet].filter(i => i >= 0 && i < state.points.length);
+    if(!ids.length){
+      selBox.innerHTML = '<div class="palnote">No grip selected — click a square grip in the profile view. Shift+click adds more.</div>';
+      return;
+    }
+    if(ids.length > 1){
+      const d = document.createElement('div');
+      d.className = 'palnote';
+      d.innerHTML = `<b>${ids.length} grips selected</b> — arrow keys nudge them all, Delete removes them. Click one grip alone to edit its exact numbers.`;
+      selBox.appendChild(d);
+      return;
+    }
     if(state.sel < 0 || state.sel >= state.points.length){
       selBox.innerHTML = '<div class="palnote">No grip selected — click a square grip in the profile view.</div>';
       return;
@@ -1347,14 +1389,16 @@ function paintStatusToggles(){
   $('#st-snap').classList.toggle('on', state.snap);
   $('#st-grid').classList.toggle('on', state.grid2d);
 }
-$('#st-snap').addEventListener('click', () => { state.snap=!state.snap; paintStatusToggles(); echo('SNAP '+(state.snap?'ON — 5 mm':'OFF')); });
-$('#st-grid').addEventListener('click', () => { state.grid2d=!state.grid2d; paintStatusToggles(); drawEditor(); });
+function toggleSnap(){ state.snap=!state.snap; paintStatusToggles(); echo('SNAP '+(state.snap?'ON — 5 mm':'OFF')); }
+function toggleGrid(){ state.grid2d=!state.grid2d; paintStatusToggles(); drawEditor(); echo('GRID '+(state.grid2d?'ON':'OFF')); }
+$('#st-snap').addEventListener('click', toggleSnap);
+$('#st-grid').addEventListener('click', toggleGrid);
 
 /* ============================================================
    COMMAND LINE
    ============================================================ */
 const echoBox = $('#echo'), cmdInput = $('#cmdinput');
-const cmdHistory = []; let histIdx = -1;
+const cmdHistory = []; let histIdx = -1; let lastCmd = '';
 function echo(msg, cls=''){
   const d = document.createElement('div');
   if(cls) d.className = cls;
@@ -1374,13 +1418,36 @@ const CMDS = [
   ['GRID <ON|OFF>', 'profile grid on/off'],
   ['BACKDROP <n>',  'pick backdrop by number'],
   ['SKETCH',        'draw freehand — click = pen down, move to draw, click = pen up'],
+  ['SHORTCUTS',     'list every keyboard shortcut'],
   ['HELP',          'this list'],
 ];
+const SHORTCUT_ROWS = [
+  ['Ctrl+Z / Ctrl+Shift+Z', 'undo / redo'],
+  ['Ctrl+S',    'save version'],
+  ['Ctrl+P',    'export PNG render'],
+  ['Ctrl+A',    'select all grips'],
+  ['Delete',    'delete selected grips'],
+  ['N',         'sketch the profile (pen)'],
+  ['E',         'flash the profile panel'],
+  ['R',         'random vessel'],
+  ['S',         'save version'],
+  ['F3',        'snap on/off'],
+  ['F7',        'grid on/off'],
+  ['Arrows',    'nudge selected grips (Shift = ×5 step)'],
+  ['Space',     'repeat last command'],
+  ['Esc',       'cancel sketch / clear selection'],
+  ['Shift+click grip', 'add grip to selection'],
+  ['Double-click line', 'add a grip · Alt+click a grip deletes it'],
+];
+function printShortcuts(){
+  echo('KEYBOARD SHORTCUTS', 'ec-ok');
+  SHORTCUT_ROWS.forEach(([k,d]) => echo(`  ${k.padEnd(22)} ${d}`));
+}
 function runCommand(raw){
   const line = raw.trim();
   if(!line) return;
   echo('> ' + line, 'ec-cmd');
-  cmdHistory.unshift(line); histIdx = -1;
+  cmdHistory.unshift(line); histIdx = -1; lastCmd = line;
   const parts = line.split(/\s+/), cmd = parts[0].toUpperCase(), arg = parts.slice(1).join(' ');
   const num = parseFloat(arg);
   switch(cmd){
@@ -1425,8 +1492,10 @@ function runCommand(raw){
       break;
     }
     case 'SKETCH': startSketch(); break;
+    case 'SHORTCUTS': printShortcuts(); break;
     case 'HELP':
       CMDS.forEach(([c,d]) => echo(`  ${c.padEnd(32)} ${d}`));
+      printShortcuts();
       break;
     default:
       echo('Unknown command — type HELP', 'ec-err');
@@ -1529,7 +1598,7 @@ function applyPreset(name, frame=true){
   if(editMode==='sketch') cancelSketch(true);
   pushUndo(snapshot(), 'preset');
   state.points = p.points.map(q=>({...q}));
-  state.sel = -1;
+  clearSel();
   applyMaterialPreset(p.mat);
   document.querySelectorAll('.tbtn.preset').forEach(b =>
     b.classList.toggle('active', b.dataset.preset===name));
@@ -1555,7 +1624,7 @@ function randomize(){
     pts.push({ x:clamp(x,4,150), h:clamp(h,1,418) });
   }
   pts.push({ x:clamp(neck*R(.95,1.3),4,150), h:H });
-  state.points = pts; state.sel = -1;
+  state.points = pts; clearSel();
   state.heightScale = R(.9,1.12); state.widthScale = R(.88,1.15);
   state.lean = Math.random()<.25 ? R(-40,40) : 0;
   state.taper = Math.random()<.25 ? R(-.3,.3) : 0;
@@ -1660,6 +1729,33 @@ $('#btn-save').addEventListener('click', saveIteration);
 /* ============================================================
    SHORTCUTS + HINT + MAIN LOOP + INIT
    ============================================================ */
+/* ---- arrow-key nudge: one undo entry per keypress burst ---- */
+let nudgeTimer = null, nudgeSnap = null;
+function nudgeSelected(dx, dh){
+  const ids = [...state.selSet].filter(i => i >= 0 && i < state.points.length);
+  if(!ids.length) return;
+  if(!nudgeTimer) nudgeSnap = snapshot();
+  ids.forEach(i => {
+    const p = state.points[i];
+    p.x = clamp(snap5(p.x + dx), -160, 160);
+    p.h = clamp(snap5(p.h + dh), -60, 460);
+  });
+  markDirty(); drawEditor(); syncProps();
+  clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => {
+    if(nudgeSnap){ pushUndo(nudgeSnap, 'nudge grips'); nudgeSnap = null; }
+    nudgeTimer = null;
+  }, 800);
+}
+function deleteSelected(){
+  const ids = [...state.selSet].filter(i => i >= 0 && i < state.points.length).sort((a,b)=>b-a);
+  if(!ids.length){ echo('Nothing selected — click a grip first', 'ec-err'); return; }
+  if(state.points.length - ids.length < 2){ echo('A profile needs at least 2 grips', 'ec-err'); return; }
+  pushUndo(snapshot(), `delete ${ids.length} grip${ids.length>1?'s':''}`);
+  ids.forEach(i => state.points.splice(i,1));
+  clearSel(); markDirty(); syncProps(); drawEditor();
+  echo(`Deleted ${ids.length} grip${ids.length>1?'s':''}`, 'ec-ok');
+}
 window.addEventListener('keydown', e => {
   if((e.ctrlKey || e.metaKey) && !e.altKey){
     const tag0 = (e.target.tagName || '').toLowerCase();
@@ -1667,11 +1763,18 @@ window.addEventListener('keydown', e => {
     const k0 = e.key.toLowerCase();
     if(k0 === 'z' && !e.shiftKey){ e.preventDefault(); undo(); return; }
     if((k0 === 'z' && e.shiftKey) || k0 === 'y'){ e.preventDefault(); redo(); return; }
+    if(k0 === 's'){ e.preventDefault(); saveIteration(); echo('SAVE → version stored', 'ec-ok'); return; }
+    if(k0 === 'p'){ e.preventDefault(); exportPNG(); return; }
+    if(k0 === 'a'){ e.preventDefault(); if(editMode === 'edit') selectAll(); return; }
   }
   if(e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if(tag === 'input' || tag === 'textarea') return;
   const k = e.key.toLowerCase();
+
+  /* AutoCAD function keys — live everywhere except text fields */
+  if(e.key === 'F3'){ e.preventDefault(); toggleSnap(); return; }
+  if(e.key === 'F7'){ e.preventDefault(); toggleGrid(); return; }
 
   if(editMode === 'sketch'){
     /* AutoCAD SKETCH: pen toggles on click; Esc cancels, Enter finishes */
@@ -1688,7 +1791,27 @@ window.addEventListener('keydown', e => {
   else if(k === 'n') startSketch();
   else if(k === 's'){ e.preventDefault(); saveIteration(); }
   else if(k === 'e'){ profwrap.classList.remove('pulse'); void profwrap.offsetWidth; profwrap.classList.add('pulse'); }
-  else if(k === 'escape') $('#hint-overlay').classList.remove('show');
+  else if(k === 'delete' || k === 'backspace'){ e.preventDefault(); deleteSelected(); }
+  else if(k === 'escape'){
+    clearSel(); syncProps(); drawEditor();
+    $('#hint-overlay').classList.remove('show');
+  }
+  else if(k === ' '){
+    /* AutoCAD: Space repeats the last command */
+    if(tag !== 'button'){
+      e.preventDefault();
+      if(lastCmd) runCommand(lastCmd);
+      else echo('Nothing to repeat — type a command first', 'ec-err');
+    }
+  }
+  else if(k.startsWith('arrow')){
+    e.preventDefault();
+    const step = (state.snap ? 5 : 1) * (e.shiftKey ? 5 : 1);
+    nudgeSelected(
+      k === 'arrowright' ? step : k === 'arrowleft' ? -step : 0,
+      k === 'arrowup' ? step : k === 'arrowdown' ? -step : 0
+    );
+  }
 });
 
 let hintSeen = true;
@@ -1725,6 +1848,8 @@ window.__vf = {
   pen: () => penDown, togglePen,
   startSketch, finishSketch, cancelSketch, undo, redo,
   toPx: (x,h) => ({ x:X(x), y:Y(h) }),
+  selectAll, selectedCount: () => state.selSet.size, nudge: nudgeSelected,
+  deleteSelected, lastCommand: () => lastCmd, toggleSnap, toggleGrid,
 };
 
 buildProps();
