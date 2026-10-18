@@ -246,13 +246,12 @@
     <aside id="left">
       <div class="panel-title"><span>PROFILE — FRONT</span><span class="mono">mm</span></div>
       <div class="seg" id="mode-seg">
-        <button data-mode="sketch" title="Shortcut: N — draw click-by-click">Sketch</button>
+        <button data-mode="sketch" title="Shortcut: N — pen down, draw, pen up (AutoCAD SKETCH)">Sketch</button>
         <button data-mode="edit" class="active" title="Drag square grips">Edit</button>
       </div>
       <div id="profwrap"><canvas id="editor"></canvas></div>
       <div class="hint">
-        <b>SKETCH</b> (<kbd>N</kbd>): click-click to draw the profile · double-click / <kbd>Enter</kbd> finishes ·
-        <kbd>&#9003;</kbd> removes last · <kbd>Shift</kbd> = straight lines · type a length, then <kbd>Enter</kbd><br>
+        <b>SKETCH</b> (<kbd>N</kbd>): <b>click</b> = pen down, draw, <b>click</b> = pen up · double-click / <kbd>Enter</kbd> finishes · <kbd>Esc</kbd> cancels<br>
         <b>EDIT</b>: <b>drag</b> a square grip · <b>double-click</b> the line adds a grip · <b>Alt + click</b> removes ·
         <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo
       </div>
@@ -303,9 +302,9 @@
 <div id="hint-overlay">
   <div class="hint-card">
     <div class="name">VESSELFORM</div>
-    <p>A one-idea tool for vessel shapes — now with drafting precision. Draw the profile with grips, type exact numbers, export anywhere.</p>
+    <p>A one-idea tool for vessel shapes — now with drafting precision. Sketch the profile pen-style like CAD, tweak the grips, export anywhere.</p>
     <ul>
-      <li><kbd>N</kbd><span><b>Sketch</b> the profile — click like a polyline, double-click to finish</span></li>
+      <li><kbd>N</kbd><span><b>Sketch</b> the profile — click for pen down, draw, click for pen up, double-click to finish</span></li>
       <li><span><b>Edit</b> the grips, then fine-tune with the sliders</span></li>
       <li><kbd>Ctrl</kbd>+<kbd>Z</kbd><span><b>Undo</b> any change &nbsp;·&nbsp; <kbd>R</kbd> <b>Random</b> &nbsp;·&nbsp; <kbd>S</kbd> <b>Save</b> version</span></li>
       <li><span>Type <code>SKETCH</code>, <code>HEIGHT 280</code>, <code>EXPORT GLB</code> below — <code>HELP</code> lists all commands</span></li>
@@ -605,8 +604,8 @@ let edScale = 1, edOX = 0, edOY = 0, edW = 0, edH = 0;
 let dragIdx = -1, hoverIdx = -1, moved = false, downXY = null;
 let preDragSnap = null;
 
-/* SKETCH mode — AutoCAD-style click-click polyline drawing */
-let editMode = 'edit', sketchPts = [], typedBuf = '', orthoOn = false;
+/* SKETCH mode — AutoCAD SKETCH command: pen DOWN records, pen UP pauses */
+let editMode = 'edit', sketchPts = [], penDown = false, lastRec = null;
 let mousePX = -1, mousePY = -1, mouseIn = false;
 
 function editorTransform(){
@@ -719,37 +718,42 @@ function drawEditor(){
     ectx.strokeRect(x-s/2, y-s/2, s, s);
   });
 
-  /* --- SKETCH polyline + rubber band + dynamic dimensions --- */
+  /* --- SKETCH recording path (AutoCAD SKETCH: pen down draws) --- */
   if(editMode==='sketch' && sketchPts.length){
-    const last = sketchPts[sketchPts.length-1];
+    ectx.save();
+    if(!penDown) ectx.globalAlpha = 0.45;   /* pen up: path rests dimmed */
     ectx.strokeStyle = '#d8a24a'; ectx.lineWidth = 1.8;
     ectx.beginPath();
     sketchPts.forEach((p,i)=>{ const xx=X(p.x), yy=Y(p.h); i?ectx.lineTo(xx,yy):ectx.moveTo(xx,yy); });
     ectx.stroke();
+    ectx.restore();
+    const lp = sketchPts[sketchPts.length-1];
     ectx.fillStyle = '#d8a24a';
-    sketchPts.forEach(p=>{ const x=X(p.x), y=Y(p.h); ectx.fillRect(x-3.5,y-3.5,7,7); });
-    if(mouseIn && mousePX >= 0){
-      const t = rubberTarget();
-      ectx.setLineDash([6,4]); ectx.strokeStyle = 'rgba(216,162,74,.9)'; ectx.lineWidth = 1.2;
-      ectx.beginPath(); ectx.moveTo(X(last.x), Y(last.h)); ectx.lineTo(X(t.x), Y(t.h)); ectx.stroke();
-      ectx.setLineDash([]);
-      const dx = t.x-last.x, dy = t.h-last.h;
-      const len = Math.hypot(dx, dy);
-      let ang = Math.atan2(dy,dx)*180/Math.PI; if(ang < 0) ang += 360;
-      const lines = ['L ' + (typedBuf !== '' ? typedBuf : f1(len)), '\u2220 ' + Math.round(ang) + '\u00B0'];
-      ectx.font = '10px JetBrains Mono, monospace';
-      const w = Math.max(ectx.measureText(lines[0]).width, ectx.measureText(lines[1]).width) + 16;
-      let tx = mousePX + 14, ty = mousePY - 46;
-      if(tx + w > edW) tx = mousePX - w - 14;
-      if(ty < 0) ty = mousePY + 14;
-      ectx.fillStyle = typedBuf !== '' ? 'rgba(216,162,74,.16)' : 'rgba(11,11,12,.92)';
-      ectx.fillRect(tx, ty, w, 38);
-      ectx.strokeStyle = typedBuf !== '' ? '#d8a24a' : '#2e2e33'; ectx.lineWidth = 1;
-      ectx.strokeRect(tx, ty, w, 38);
-      ectx.fillStyle = typedBuf !== '' ? '#d8a24a' : '#e8e6df'; ectx.textAlign = 'left';
-      ectx.fillText(lines[0], tx+8, ty+15); ectx.fillText(lines[1], tx+8, ty+30);
+    ectx.fillRect(X(lp.x)-3, Y(lp.h)-3, 6, 6);
+    $('#objinfo').textContent = penDown
+      ? `SKETCH \u00B7 PEN DOWN \u00B7 ${sketchPts.length} pts`
+      : `SKETCH \u00B7 PEN UP \u00B7 ${sketchPts.length} pts \u2014 click to draw`;
+  } else if(editMode==='sketch'){
+    $('#objinfo').textContent = 'SKETCH \u2014 click to put the pen down';
+  }
+  /* --- pen tip dot + PEN DOWN / pen-up tag near cursor --- */
+  if(editMode==='sketch' && mouseIn && mousePX >= 0){
+    if(penDown){
+      ectx.fillStyle = '#d8a24a';
+      ectx.beginPath(); ectx.arc(mousePX, mousePY, 3.5, 0, Math.PI*2); ectx.fill();
     }
-    $('#objinfo').textContent = `SKETCH \u00B7 ${sketchPts.length} pt${sketchPts.length===1?'':'s'} \u2014 double-click / Enter to finish`;
+    const tag = penDown ? 'PEN DOWN' : 'pen up \u2014 click to draw';
+    ectx.font = '9.5px JetBrains Mono, monospace';
+    const tw = ectx.measureText(tag).width + 14;
+    let tx = mousePX + 12, ty = mousePY - 34;
+    if(tx + tw > edW) tx = mousePX - tw - 12;
+    if(ty < 0) ty = mousePY + 30;
+    ectx.fillStyle = penDown ? '#d8a24a' : 'rgba(11,11,12,.92)';
+    ectx.fillRect(tx, ty, tw, 18);
+    ectx.strokeStyle = penDown ? '#d8a24a' : '#2e2e33'; ectx.lineWidth = 1;
+    ectx.strokeRect(tx, ty, tw, 18);
+    ectx.fillStyle = penDown ? '#0b0b0c' : '#8f8a7d'; ectx.textAlign = 'left';
+    ectx.fillText(tag, tx+7, ty+13);
   }
   /* --- crosshair + coordinate tag --- */
   if(mouseIn && mousePX >= 0){
@@ -792,7 +796,7 @@ ed.addEventListener('pointerdown', e => {
   const px = e.clientX-rect.left, py = e.clientY-rect.top;
   mousePX = px; mousePY = py; mouseIn = true;
   if(editMode === 'sketch'){
-    if(e.button === 0) placeSketchPoint(rubberTarget());
+    if(e.button === 0) togglePen();   /* click = pen down / pen up */
     return;
   }
   const i = hitPoint(px,py);
@@ -809,6 +813,7 @@ ed.addEventListener('pointerdown', e => {
 ed.addEventListener('pointermove', e => {
   const rect = ed.getBoundingClientRect();
   mousePX = e.clientX-rect.left; mousePY = e.clientY-rect.top; mouseIn = true;
+  if(editMode === 'sketch'){ recordPenMove(); drawEditor(); return; }
   if(dragIdx >= 0){
     if(downXY && Math.hypot(e.clientX-downXY.x, e.clientY-downXY.y) > 3) moved = true;
     const m = toMM(mousePX, mousePY), p = state.points[dragIdx];
@@ -856,7 +861,10 @@ ed.addEventListener('contextmenu', e => {
 });
 
 /* ============================================================
-   SKETCH MODE — AutoCAD-style click-click polyline drawing.
+   SKETCH MODE — AutoCAD SKETCH command semantics.
+   First click = PEN DOWN (records path), next click = PEN UP
+   (reposition freely), click again resumes. Double-click /
+   Enter / right-click finishes, Esc cancels.
    SKETCH: draw the form · EDIT: tweak grips · sliders: fine tune
    ============================================================ */
 function paintSeg(){
@@ -867,57 +875,85 @@ document.querySelectorAll('#mode-seg button').forEach(b =>
   b.addEventListener('click', () => {
     if(b.dataset.mode === 'sketch') startSketch();
     else if(editMode === 'sketch'){
-      if(sketchPts.length >= 2) finishSketch(); else cancelSketch();
+      if(sketchPts.length >= 3) finishSketch(); else cancelSketch();
     }
   }));
 
 function startSketch(){
   if(editMode === 'sketch') return;
-  editMode = 'sketch'; sketchPts = []; typedBuf = ''; state.sel = -1;
+  editMode = 'sketch'; sketchPts = []; penDown = false; lastRec = null; state.sel = -1;
   paintSeg(); drawEditor(); syncProps();
-  echo('SKETCH \u2014 click to place points \u00B7 double-click / Enter / right-click finishes \u00B7 Backspace removes last \u00B7 Shift = straight lines \u00B7 Esc cancels', 'ec-ok');
+  echo('SKETCH \u2014 click = pen DOWN, move to draw, click = pen up \u00B7 double-click / Enter / right-click finishes \u00B7 Esc cancels', 'ec-ok');
 }
 function cancelSketch(quiet){
   if(editMode !== 'sketch') return;
-  editMode = 'edit'; sketchPts = []; typedBuf = '';
+  editMode = 'edit'; sketchPts = []; penDown = false; lastRec = null;
   paintSeg(); drawEditor(); markDirty();
   if(!quiet) echo('SKETCH cancelled \u2014 profile unchanged', 'ec-ok');
 }
-function finishSketch(){
+function togglePen(){
   if(editMode !== 'sketch') return;
-  if(sketchPts.length < 2){ cancelSketch(); echo('SKETCH needs at least 2 points \u2014 cancelled', 'ec-err'); return; }
-  pushUndo(snapshot(), 'sketch');
-  state.points = sketchPts.map(p => ({ x:p.x, h:p.h }));
-  state.sel = -1;
-  editMode = 'edit'; sketchPts = []; typedBuf = '';
-  paintSeg(); syncProps(); drawEditor(); markDirty(); frameCamera();
-  echo(`SKETCH done \u2014 ${state.points.length} points \u2192 profile`, 'ec-ok');
-}
-function placeSketchPoint(t){
-  sketchPts.push({ x:t.x, h:t.h });
-  echo(`  point ${sketchPts.length} \u2014 X ${f1(t.x)}  Y ${f1(t.h)}`);
+  penDown = !penDown;
+  if(penDown){
+    /* anchor the stroke at the click point */
+    const m = toMM(mousePX, mousePY);
+    const p = { x:clamp(snap5(m.x),-160,160), h:clamp(snap5(m.h),-60,460) };
+    sketchPts.push(p); lastRec = p;
+    if(sketchPts.length > 4000) sketchPts.splice(0, sketchPts.length - 4000);
+    echo('  pen DOWN \u2014 drawing', 'ec-ok');
+  } else {
+    echo(`  pen up \u2014 ${sketchPts.length} pts recorded`, 'ec-ok');
+  }
   drawEditor();
 }
-function rubberTarget(){
+function recordPenMove(){
+  /* AutoCAD SKETCH increment: record when cursor moved >= 4 mm */
+  if(!penDown || !mouseIn || mousePX < 0) return;
   const m = toMM(mousePX, mousePY);
-  let x = clamp(snap5(m.x), -160, 160), h = clamp(snap5(m.h), -60, 460);
-  if(orthoOn && sketchPts.length){
-    const last = sketchPts[sketchPts.length-1];
-    if(Math.abs(x-last.x) >= Math.abs(h-last.h)) h = last.h; else x = last.x;
+  const x = clamp(snap5(m.x),-160,160), h = clamp(snap5(m.h),-60,460);
+  if(!lastRec || Math.hypot(x-lastRec.x, h-lastRec.h) >= 4){
+    sketchPts.push({ x, h }); lastRec = { x, h };
+    if(sketchPts.length > 4000) sketchPts.splice(0, sketchPts.length - 4000);
   }
-  return { x, h };
 }
-function placeTyped(){
-  const v = parseFloat(typedBuf);
-  typedBuf = '';
-  if(isNaN(v) || !sketchPts.length){ drawEditor(); return; }
-  const last = sketchPts[sketchPts.length-1];
-  const t = (mouseIn && mousePX >= 0) ? rubberTarget() : { x:last.x+1, h:last.h };
-  const ang = Math.atan2(t.h-last.h, t.x-last.x);
-  placeSketchPoint({
-    x: clamp(last.x + v*Math.cos(ang), -160, 160),
-    h: clamp(last.h + v*Math.sin(ang), -60, 460),
-  });
+/* Douglas-Peucker path simplification (tolerance in mm) */
+function simplifyDP(pts, tol){
+  if(pts.length <= 2) return pts.slice();
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = keep[pts.length-1] = true;
+  const stack = [[0, pts.length-1]];
+  while(stack.length){
+    const [a,b] = stack.pop();
+    let dmax = 0, idx = -1;
+    const ax = pts[a].x, ah = pts[a].h, bx = pts[b].x, bh = pts[b].h;
+    const segLen = Math.hypot(bx-ax, bh-ah) || 1e-9;
+    for(let i=a+1;i<b;i++){
+      const d = Math.abs((bh-ah)*pts[i].x - (bx-ax)*pts[i].h + bx*ah - bh*ax) / segLen;
+      if(d > dmax){ dmax = d; idx = i; }
+    }
+    if(dmax > tol && idx > 0){ keep[idx] = true; stack.push([a,idx],[idx,b]); }
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+function resampleEven(pts, n){
+  if(pts.length <= n) return pts;
+  const out = [];
+  for(let i=0;i<n;i++) out.push(pts[Math.round(i*(pts.length-1)/(n-1))]);
+  return out;
+}
+function finishSketch(){
+  if(editMode !== 'sketch') return;
+  penDown = false;
+  if(sketchPts.length < 3){ cancelSketch(); echo('sketch too short \u2014 profile unchanged', 'ec-err'); return; }
+  let pts = simplifyDP(sketchPts, 1.5);
+  pts = resampleEven(pts, 200);
+  if(pts.length < 3){ cancelSketch(); echo('sketch too short \u2014 profile unchanged', 'ec-err'); return; }
+  pushUndo(snapshot(), 'sketch');
+  state.points = pts.map(p => ({ x:p.x, h:p.h }));
+  state.sel = -1;
+  editMode = 'edit'; sketchPts = []; lastRec = null;
+  paintSeg(); syncProps(); drawEditor(); markDirty(); frameCamera();
+  echo(`SKETCH done \u2014 ${state.points.length} points \u2192 profile`, 'ec-ok');
 }
 
 /* ---------------- undo / redo ---------------- */
@@ -1337,7 +1373,7 @@ const CMDS = [
   ['SNAP <ON|OFF>', 'snap grips to 5 mm'],
   ['GRID <ON|OFF>', 'profile grid on/off'],
   ['BACKDROP <n>',  'pick backdrop by number'],
-  ['SKETCH',        'draw a new profile — click-click like a polyline'],
+  ['SKETCH',        'draw freehand — click = pen down, move to draw, click = pen up'],
   ['HELP',          'this list'],
 ];
 function runCommand(raw){
@@ -1625,7 +1661,6 @@ $('#btn-save').addEventListener('click', saveIteration);
    SHORTCUTS + HINT + MAIN LOOP + INIT
    ============================================================ */
 window.addEventListener('keydown', e => {
-  if(e.key === 'Shift'){ orthoOn = true; if(editMode==='sketch') drawEditor(); return; }
   if((e.ctrlKey || e.metaKey) && !e.altKey){
     const tag0 = (e.target.tagName || '').toLowerCase();
     if(tag0 === 'input' || tag0 === 'textarea') return;
@@ -1639,20 +1674,13 @@ window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
   if(editMode === 'sketch'){
+    /* AutoCAD SKETCH: pen toggles on click; Esc cancels, Enter finishes */
     if(k === 'escape'){
       if($('#hint-overlay').classList.contains('show')) $('#hint-overlay').classList.remove('show');
-      else if(typedBuf !== ''){ typedBuf = ''; drawEditor(); }
       else cancelSketch();
       return;
     }
-    if(k === 'enter'){ if(typedBuf !== '') placeTyped(); else finishSketch(); return; }
-    if(k === 'backspace'){
-      e.preventDefault();
-      if(typedBuf !== ''){ typedBuf = typedBuf.slice(0,-1); drawEditor(); }
-      else if(sketchPts.length){ sketchPts.pop(); echo(`  back \u2014 ${sketchPts.length} pts`); drawEditor(); }
-      return;
-    }
-    if(/^[0-9.\-]$/.test(e.key) && typedBuf.length < 9){ typedBuf += e.key; drawEditor(); return; }
+    if(k === 'enter'){ finishSketch(); return; }
     return; /* swallow r/s/e/n etc. while sketching */
   }
 
@@ -1661,9 +1689,6 @@ window.addEventListener('keydown', e => {
   else if(k === 's'){ e.preventDefault(); saveIteration(); }
   else if(k === 'e'){ profwrap.classList.remove('pulse'); void profwrap.offsetWidth; profwrap.classList.add('pulse'); }
   else if(k === 'escape') $('#hint-overlay').classList.remove('show');
-});
-window.addEventListener('keyup', e => {
-  if(e.key === 'Shift'){ orthoOn = false; if(editMode==='sketch') drawEditor(); }
 });
 
 let hintSeen = true;
@@ -1696,7 +1721,8 @@ window.__vf = {
   }),
   mockBackdrops: items => { apiBackdrops = items; renderApiBackdrops(); },
   setBackdrop,
-  sketch: () => ({ mode:editMode, count:sketchPts.length, typed:typedBuf }),
+  sketch: () => ({ mode:editMode, pen:penDown, count:sketchPts.length }),
+  pen: () => penDown, togglePen,
   startSketch, finishSketch, cancelSketch, undo, redo,
   toPx: (x,h) => ({ x:X(x), y:Y(h) }),
 };
