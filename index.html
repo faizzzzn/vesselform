@@ -65,6 +65,12 @@
   .hint b{color:var(--muted); font-weight:500;}
   .hint kbd{font-family:var(--mono); font-size:9px; color:var(--muted); border:1px solid var(--line2);
     border-radius:3px; padding:0 4px; margin:0 2px;}
+  .seg{display:flex; border:1px solid var(--line2); border-radius:3px; overflow:hidden; margin-bottom:8px; flex:none;}
+  .seg button{flex:1; background:transparent; border:none; color:var(--dim); font-family:var(--mono);
+    font-size:10px; letter-spacing:.18em; padding:7px 0; cursor:pointer; text-transform:uppercase;}
+  .seg button + button{border-left:1px solid var(--line2);}
+  .seg button:hover{color:var(--ink);}
+  .seg button.active{background:var(--accent); color:#0b0b0c; font-weight:600;}
 
   /* ---------- stage (3D model space) ---------- */
   #stage{position:relative; min-width:0; background:var(--bg); overflow:hidden;}
@@ -238,12 +244,17 @@
 
   <main id="workbench">
     <aside id="left">
-      <div class="panel-title"><span>PROFILE — FRONT</span><span class="mono">mm · grips</span></div>
+      <div class="panel-title"><span>PROFILE — FRONT</span><span class="mono">mm</span></div>
+      <div class="seg" id="mode-seg">
+        <button data-mode="sketch" title="Shortcut: N — draw click-by-click">Sketch</button>
+        <button data-mode="edit" class="active" title="Drag square grips">Edit</button>
+      </div>
       <div id="profwrap"><canvas id="editor"></canvas></div>
       <div class="hint">
-        <b>Drag</b> a square grip to reshape · <b>Double-click</b> the line adds a grip ·
-        <b>Alt + click</b> a grip removes it<br>
-        SNAP rounds every edit to 5 mm · type <kbd>HEIGHT 280</kbd> in the command line
+        <b>SKETCH</b> (<kbd>N</kbd>): click-click to draw the profile · double-click / <kbd>Enter</kbd> finishes ·
+        <kbd>&#9003;</kbd> removes last · <kbd>Shift</kbd> = straight lines · type a length, then <kbd>Enter</kbd><br>
+        <b>EDIT</b>: <b>drag</b> a square grip · <b>double-click</b> the line adds a grip · <b>Alt + click</b> removes ·
+        <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo
       </div>
     </aside>
 
@@ -294,9 +305,10 @@
     <div class="name">VESSELFORM</div>
     <p>A one-idea tool for vessel shapes — now with drafting precision. Draw the profile with grips, type exact numbers, export anywhere.</p>
     <ul>
-      <li><kbd>R</kbd><span><b>Random</b> — a fresh vessel &nbsp;·&nbsp; <kbd>S</kbd> <b>Save</b> this version</span></li>
-      <li><kbd>E</kbd><span><b>Focus</b> the profile view</span></li>
-      <li><span>Type <code>HEIGHT 280</code>, <code>EXPORT GLB</code>, <code>PRESET AMPHORA</code> below — <code>HELP</code> lists all commands</span></li>
+      <li><kbd>N</kbd><span><b>Sketch</b> the profile — click like a polyline, double-click to finish</span></li>
+      <li><span><b>Edit</b> the grips, then fine-tune with the sliders</span></li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd><span><b>Undo</b> any change &nbsp;·&nbsp; <kbd>R</kbd> <b>Random</b> &nbsp;·&nbsp; <kbd>S</kbd> <b>Save</b> version</span></li>
+      <li><span>Type <code>SKETCH</code>, <code>HEIGHT 280</code>, <code>EXPORT GLB</code> below — <code>HELP</code> lists all commands</span></li>
       <li><span>STL / OBJ / GLB open in any 3D app — GLB exports in meters, the rest in mm</span></li>
     </ul>
     <button class="tbtn" id="hint-ok">Start drafting</button>
@@ -591,6 +603,10 @@ const ed = $('#editor'), ectx = ed.getContext('2d');
 const profwrap = $('#profwrap');
 let edScale = 1, edOX = 0, edOY = 0, edW = 0, edH = 0;
 let dragIdx = -1, hoverIdx = -1, moved = false, downXY = null;
+let preDragSnap = null;
+
+/* SKETCH mode — AutoCAD-style click-click polyline drawing */
+let editMode = 'edit', sketchPts = [], typedBuf = '', orthoOn = false;
 let mousePX = -1, mousePY = -1, mouseIn = false;
 
 function editorTransform(){
@@ -649,6 +665,7 @@ function drawEditor(){
     }
   }
 
+  if(editMode==='sketch'){ ectx.save(); ectx.globalAlpha = .18; }
   /* --- filled silhouette preview (|x| mirrored) --- */
   const samp = catmullSample(state.points, 220);
   if(samp.length){
@@ -662,6 +679,7 @@ function drawEditor(){
     ectx.strokeStyle = '#e8e2d4'; ectx.lineWidth = 1.5; ectx.stroke();
   }
 
+  if(editMode==='sketch') ectx.restore();
   /* --- centreline: dash-dot --- */
   ectx.setLineDash([14,4,2,4]); ectx.strokeStyle = '#3d3d44'; ectx.lineWidth = 1;
   ectx.beginPath(); ectx.moveTo(edOX, yB-6); ectx.lineTo(edOX, yT+6); ectx.stroke();
@@ -701,6 +719,38 @@ function drawEditor(){
     ectx.strokeRect(x-s/2, y-s/2, s, s);
   });
 
+  /* --- SKETCH polyline + rubber band + dynamic dimensions --- */
+  if(editMode==='sketch' && sketchPts.length){
+    const last = sketchPts[sketchPts.length-1];
+    ectx.strokeStyle = '#d8a24a'; ectx.lineWidth = 1.8;
+    ectx.beginPath();
+    sketchPts.forEach((p,i)=>{ const xx=X(p.x), yy=Y(p.h); i?ectx.lineTo(xx,yy):ectx.moveTo(xx,yy); });
+    ectx.stroke();
+    ectx.fillStyle = '#d8a24a';
+    sketchPts.forEach(p=>{ const x=X(p.x), y=Y(p.h); ectx.fillRect(x-3.5,y-3.5,7,7); });
+    if(mouseIn && mousePX >= 0){
+      const t = rubberTarget();
+      ectx.setLineDash([6,4]); ectx.strokeStyle = 'rgba(216,162,74,.9)'; ectx.lineWidth = 1.2;
+      ectx.beginPath(); ectx.moveTo(X(last.x), Y(last.h)); ectx.lineTo(X(t.x), Y(t.h)); ectx.stroke();
+      ectx.setLineDash([]);
+      const dx = t.x-last.x, dy = t.h-last.h;
+      const len = Math.hypot(dx, dy);
+      let ang = Math.atan2(dy,dx)*180/Math.PI; if(ang < 0) ang += 360;
+      const lines = ['L ' + (typedBuf !== '' ? typedBuf : f1(len)), '\u2220 ' + Math.round(ang) + '\u00B0'];
+      ectx.font = '10px JetBrains Mono, monospace';
+      const w = Math.max(ectx.measureText(lines[0]).width, ectx.measureText(lines[1]).width) + 16;
+      let tx = mousePX + 14, ty = mousePY - 46;
+      if(tx + w > edW) tx = mousePX - w - 14;
+      if(ty < 0) ty = mousePY + 14;
+      ectx.fillStyle = typedBuf !== '' ? 'rgba(216,162,74,.16)' : 'rgba(11,11,12,.92)';
+      ectx.fillRect(tx, ty, w, 38);
+      ectx.strokeStyle = typedBuf !== '' ? '#d8a24a' : '#2e2e33'; ectx.lineWidth = 1;
+      ectx.strokeRect(tx, ty, w, 38);
+      ectx.fillStyle = typedBuf !== '' ? '#d8a24a' : '#e8e6df'; ectx.textAlign = 'left';
+      ectx.fillText(lines[0], tx+8, ty+15); ectx.fillText(lines[1], tx+8, ty+30);
+    }
+    $('#objinfo').textContent = `SKETCH \u00B7 ${sketchPts.length} pt${sketchPts.length===1?'':'s'} \u2014 double-click / Enter to finish`;
+  }
   /* --- crosshair + coordinate tag --- */
   if(mouseIn && mousePX >= 0){
     ectx.strokeStyle = 'rgba(216,162,74,.30)'; ectx.lineWidth = 1;
@@ -740,10 +790,16 @@ function hitPoint(px,py){
 ed.addEventListener('pointerdown', e => {
   const rect = ed.getBoundingClientRect();
   const px = e.clientX-rect.left, py = e.clientY-rect.top;
+  mousePX = px; mousePY = py; mouseIn = true;
+  if(editMode === 'sketch'){
+    if(e.button === 0) placeSketchPoint(rubberTarget());
+    return;
+  }
   const i = hitPoint(px,py);
   if(i >= 0){
     dragIdx = i; hoverIdx = i; state.sel = i;
     moved = false; downXY = {x:e.clientX, y:e.clientY};
+    preDragSnap = snapshot();
     ed.setPointerCapture(e.pointerId);
     syncProps(); drawEditor();
   } else {
@@ -763,19 +819,24 @@ ed.addEventListener('pointermove', e => {
     const i = hitPoint(mousePX, mousePY);
     if(i !== hoverIdx){ hoverIdx = i; drawEditor(); }
     else drawEditor();
-    ed.style.cursor = i >= 0 ? 'grab' : 'crosshair';
+    ed.style.cursor = editMode === 'sketch' ? 'crosshair' : (i >= 0 ? 'grab' : 'crosshair');
   }
 });
 ed.addEventListener('pointerleave', () => { mouseIn = false; hoverIdx = -1; drawEditor(); });
 ed.addEventListener('pointerup', e => {
+  if(editMode === 'sketch') return;
   if(dragIdx >= 0 && e.altKey && !moved && state.points.length > 2){
+    pushUndo(snapshot(), 'delete grip');
     state.points.splice(dragIdx,1);
     if(state.sel >= state.points.length) state.sel = -1;
     markDirty(); syncProps();
+  } else if(dragIdx >= 0 && moved && preDragSnap){
+    pushUndo(preDragSnap, 'drag grip');
   }
-  dragIdx = -1; drawEditor();
+  dragIdx = -1; preDragSnap = null; drawEditor();
 });
 ed.addEventListener('dblclick', e => {
+  if(editMode === 'sketch'){ finishSketch(); return; }
   const rect = ed.getBoundingClientRect();
   const m = toMM(e.clientX-rect.left, e.clientY-rect.top);
   const samp = catmullSample(state.points, 400);
@@ -784,10 +845,121 @@ ed.addEventListener('dblclick', e => {
   const segs = Math.max(state.points.length-1, 1);
   const per = Math.max(2, Math.round(400/segs));
   const at = clamp(Math.floor(bi/per)+1, 1, state.points.length-1);
+  pushUndo(snapshot(), 'add grip');
   state.points.splice(at, 0, { x:clamp(snap5(best.x),-160,160), h:clamp(snap5(best.h),-60,460) });
   state.sel = at;
   markDirty(); drawEditor(); syncProps();
 });
+ed.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if(editMode === 'sketch') finishSketch();
+});
+
+/* ============================================================
+   SKETCH MODE — AutoCAD-style click-click polyline drawing.
+   SKETCH: draw the form · EDIT: tweak grips · sliders: fine tune
+   ============================================================ */
+function paintSeg(){
+  document.querySelectorAll('#mode-seg button').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === editMode));
+}
+document.querySelectorAll('#mode-seg button').forEach(b =>
+  b.addEventListener('click', () => {
+    if(b.dataset.mode === 'sketch') startSketch();
+    else if(editMode === 'sketch'){
+      if(sketchPts.length >= 2) finishSketch(); else cancelSketch();
+    }
+  }));
+
+function startSketch(){
+  if(editMode === 'sketch') return;
+  editMode = 'sketch'; sketchPts = []; typedBuf = ''; state.sel = -1;
+  paintSeg(); drawEditor(); syncProps();
+  echo('SKETCH \u2014 click to place points \u00B7 double-click / Enter / right-click finishes \u00B7 Backspace removes last \u00B7 Shift = straight lines \u00B7 Esc cancels', 'ec-ok');
+}
+function cancelSketch(quiet){
+  if(editMode !== 'sketch') return;
+  editMode = 'edit'; sketchPts = []; typedBuf = '';
+  paintSeg(); drawEditor(); markDirty();
+  if(!quiet) echo('SKETCH cancelled \u2014 profile unchanged', 'ec-ok');
+}
+function finishSketch(){
+  if(editMode !== 'sketch') return;
+  if(sketchPts.length < 2){ cancelSketch(); echo('SKETCH needs at least 2 points \u2014 cancelled', 'ec-err'); return; }
+  pushUndo(snapshot(), 'sketch');
+  state.points = sketchPts.map(p => ({ x:p.x, h:p.h }));
+  state.sel = -1;
+  editMode = 'edit'; sketchPts = []; typedBuf = '';
+  paintSeg(); syncProps(); drawEditor(); markDirty(); frameCamera();
+  echo(`SKETCH done \u2014 ${state.points.length} points \u2192 profile`, 'ec-ok');
+}
+function placeSketchPoint(t){
+  sketchPts.push({ x:t.x, h:t.h });
+  echo(`  point ${sketchPts.length} \u2014 X ${f1(t.x)}  Y ${f1(t.h)}`);
+  drawEditor();
+}
+function rubberTarget(){
+  const m = toMM(mousePX, mousePY);
+  let x = clamp(snap5(m.x), -160, 160), h = clamp(snap5(m.h), -60, 460);
+  if(orthoOn && sketchPts.length){
+    const last = sketchPts[sketchPts.length-1];
+    if(Math.abs(x-last.x) >= Math.abs(h-last.h)) h = last.h; else x = last.x;
+  }
+  return { x, h };
+}
+function placeTyped(){
+  const v = parseFloat(typedBuf);
+  typedBuf = '';
+  if(isNaN(v) || !sketchPts.length){ drawEditor(); return; }
+  const last = sketchPts[sketchPts.length-1];
+  const t = (mouseIn && mousePX >= 0) ? rubberTarget() : { x:last.x+1, h:last.h };
+  const ang = Math.atan2(t.h-last.h, t.x-last.x);
+  placeSketchPoint({
+    x: clamp(last.x + v*Math.cos(ang), -160, 160),
+    h: clamp(last.h + v*Math.sin(ang), -60, 460),
+  });
+}
+
+/* ---------------- undo / redo ---------------- */
+const undoStack = [], redoStack = [];
+function pushUndo(snap, label){
+  undoStack.push({ snap: snap || snapshot(), label: label || 'edit' });
+  if(undoStack.length > 60) undoStack.shift();
+  redoStack.length = 0;
+}
+function restoreSnapshot(p){
+  const bd = p.backdrop || 'dark';
+  Object.assign(state, {
+    points:p.points.map(q=>({...q})), heightScale:p.heightScale, widthScale:p.widthScale,
+    lean:p.lean||0, taper:p.taper||0,
+    facets:p.facets, ribs:p.ribs, ribDepth:p.ribDepth, twist:p.twist, ovality:p.ovality,
+    noiseAmt:p.noiseAmt, noiseSeed:p.noiseSeed, wall:p.wall ?? 3,
+    mat:p.mat, color:p.color, roughness:p.roughness, metalness:p.metalness,
+    clearcoat:p.clearcoat, opacity:p.opacity,
+    backdrop:bd, shadow:p.shadow!==false, grid3d:!!p.grid3d, sel:-1,
+  });
+  applyMaterial(); buildProps(); paintStatusToggles(); paintViewToggles();
+  grid3.visible = state.grid3d;
+  setBackdrop(bd);
+  controls.autoRotate = state.autorotate;
+  drawEditor(); markDirty();
+}
+function undo(){
+  if(!undoStack.length){ echo('Nothing to undo', 'ec-err'); return; }
+  redoStack.push({ snap:snapshot(), label:'redo' });
+  const u = undoStack.pop();
+  if(editMode==='sketch') cancelSketch(true);
+  restoreSnapshot(u.snap);
+  echo('Undo \u2014 ' + u.label, 'ec-ok');
+}
+function redo(){
+  if(!redoStack.length){ echo('Nothing to redo', 'ec-err'); return; }
+  undoStack.push({ snap:snapshot(), label:'redo' });
+  const u = redoStack.pop();
+  if(editMode==='sketch') cancelSketch(true);
+  restoreSnapshot(u.snap);
+  echo('Redo', 'ec-ok');
+}
 
 /* 3D crosshair overlay */
 const xhair = $('#xhair'), xhH = xhair.querySelector('.hl'),
@@ -1165,6 +1337,7 @@ const CMDS = [
   ['SNAP <ON|OFF>', 'snap grips to 5 mm'],
   ['GRID <ON|OFF>', 'profile grid on/off'],
   ['BACKDROP <n>',  'pick backdrop by number'],
+  ['SKETCH',        'draw a new profile — click-click like a polyline'],
   ['HELP',          'this list'],
 ];
 function runCommand(raw){
@@ -1215,6 +1388,7 @@ function runCommand(raw){
       else { echo('Backdrops:', 'ec-ok'); list.forEach((b,i)=>echo(`  ${i+1}  ${b}`)); }
       break;
     }
+    case 'SKETCH': startSketch(); break;
     case 'HELP':
       CMDS.forEach(([c,d]) => echo(`  ${c.padEnd(32)} ${d}`));
       break;
@@ -1316,6 +1490,8 @@ $('#btn-png').addEventListener('click', exportPNG);
    ============================================================ */
 function applyPreset(name, frame=true){
   const p = PRESETS[name]; if(!p) return;
+  if(editMode==='sketch') cancelSketch(true);
+  pushUndo(snapshot(), 'preset');
   state.points = p.points.map(q=>({...q}));
   state.sel = -1;
   applyMaterialPreset(p.mat);
@@ -1329,6 +1505,8 @@ document.querySelectorAll('.tbtn.preset').forEach(b =>
   b.addEventListener('click', () => applyPreset(b.dataset.preset)));
 
 function randomize(){
+  if(editMode==='sketch') cancelSketch(true);
+  pushUndo(snapshot(), 'random');
   const R = (a,b) => a + Math.random()*(b-a);
   const Ri = (a,b) => Math.round(R(a,b));
   const H = R(180, 360), nPts = Ri(5,8);
@@ -1359,6 +1537,8 @@ function randomize(){
 }
 $('#btn-random').addEventListener('click', randomize);
 $('#btn-reset').addEventListener('click', () => {
+  if(editMode==='sketch') cancelSketch(true);
+  pushUndo(snapshot(), 'reset');
   const keepBd = state.backdrop;
   state = DEFAULTS();
   state.backdrop = keepBd;
@@ -1434,21 +1614,10 @@ function saveIteration(){
 }
 function restoreIteration(id){
   const rec = iterations.find(r => r.id === id); if(!rec) return;
-  const p = rec.params, bd = p.backdrop || 'dark';
-  Object.assign(state, {
-    points:p.points.map(q=>({...q})), heightScale:p.heightScale, widthScale:p.widthScale,
-    lean:p.lean||0, taper:p.taper||0,
-    facets:p.facets, ribs:p.ribs, ribDepth:p.ribDepth, twist:p.twist, ovality:p.ovality,
-    noiseAmt:p.noiseAmt, noiseSeed:p.noiseSeed, wall:p.wall ?? 3,
-    mat:p.mat, color:p.color, roughness:p.roughness, metalness:p.metalness,
-    clearcoat:p.clearcoat, opacity:p.opacity,
-    backdrop:bd, shadow:p.shadow!==false, grid3d:!!p.grid3d, sel:-1,
-  });
-  applyMaterial(); buildProps(); paintStatusToggles(); paintViewToggles();
-  grid3.visible = state.grid3d;
-  setBackdrop(bd);
-  controls.autoRotate = state.autorotate;
-  drawEditor(); markDirty(); frameCamera();
+  if(editMode==='sketch') cancelSketch(true);
+  pushUndo(snapshot(), 'restore version');
+  restoreSnapshot(rec.params);
+  frameCamera();
 }
 $('#btn-save').addEventListener('click', saveIteration);
 
@@ -1456,14 +1625,45 @@ $('#btn-save').addEventListener('click', saveIteration);
    SHORTCUTS + HINT + MAIN LOOP + INIT
    ============================================================ */
 window.addEventListener('keydown', e => {
+  if(e.key === 'Shift'){ orthoOn = true; if(editMode==='sketch') drawEditor(); return; }
+  if((e.ctrlKey || e.metaKey) && !e.altKey){
+    const tag0 = (e.target.tagName || '').toLowerCase();
+    if(tag0 === 'input' || tag0 === 'textarea') return;
+    const k0 = e.key.toLowerCase();
+    if(k0 === 'z' && !e.shiftKey){ e.preventDefault(); undo(); return; }
+    if((k0 === 'z' && e.shiftKey) || k0 === 'y'){ e.preventDefault(); redo(); return; }
+  }
   if(e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if(tag === 'input' || tag === 'textarea') return;
   const k = e.key.toLowerCase();
+
+  if(editMode === 'sketch'){
+    if(k === 'escape'){
+      if($('#hint-overlay').classList.contains('show')) $('#hint-overlay').classList.remove('show');
+      else if(typedBuf !== ''){ typedBuf = ''; drawEditor(); }
+      else cancelSketch();
+      return;
+    }
+    if(k === 'enter'){ if(typedBuf !== '') placeTyped(); else finishSketch(); return; }
+    if(k === 'backspace'){
+      e.preventDefault();
+      if(typedBuf !== ''){ typedBuf = typedBuf.slice(0,-1); drawEditor(); }
+      else if(sketchPts.length){ sketchPts.pop(); echo(`  back \u2014 ${sketchPts.length} pts`); drawEditor(); }
+      return;
+    }
+    if(/^[0-9.\-]$/.test(e.key) && typedBuf.length < 9){ typedBuf += e.key; drawEditor(); return; }
+    return; /* swallow r/s/e/n etc. while sketching */
+  }
+
   if(k === 'r') randomize();
+  else if(k === 'n') startSketch();
   else if(k === 's'){ e.preventDefault(); saveIteration(); }
   else if(k === 'e'){ profwrap.classList.remove('pulse'); void profwrap.offsetWidth; profwrap.classList.add('pulse'); }
   else if(k === 'escape') $('#hint-overlay').classList.remove('show');
+});
+window.addEventListener('keyup', e => {
+  if(e.key === 'Shift'){ orthoOn = false; if(editMode==='sketch') drawEditor(); }
 });
 
 let hintSeen = true;
@@ -1496,9 +1696,13 @@ window.__vf = {
   }),
   mockBackdrops: items => { apiBackdrops = items; renderApiBackdrops(); },
   setBackdrop,
+  sketch: () => ({ mode:editMode, count:sketchPts.length, typed:typedBuf }),
+  startSketch, finishSketch, cancelSketch, undo, redo,
+  toPx: (x,h) => ({ x:X(x), y:Y(h) }),
 };
 
 buildProps();
+paintSeg();
 paintStatusToggles();
 paintViewToggles();
 applyMaterialPreset('porcelain');
